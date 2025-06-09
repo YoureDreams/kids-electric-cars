@@ -1,75 +1,58 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const geoip = require('geoip-lite');
-const moment = require('moment-timezone');
+const useragent = require('useragent');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(bodyParser.json());
-app.use(express.static('public')); // serve static files from 'public' folder
-
-// Connect to MongoDB (schimba cu URL-ul tău MongoDB)
-mongoose.connect(process.env.MONGO_URI, {
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+  useUnifiedTopology: true
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch(err => console.error('MongoDB connection error:', err));
 
-
-// Schemes & Models
-const VisitorSchema = new mongoose.Schema({
-  sessionId: String,
+// Schemas
+const visitorSchema = new mongoose.Schema({
   ip: String,
   geo: Object,
-  timestamp: String,
+  userAgent: String,
   browser: String,
+  os: String,
   platform: String,
   language: String,
-  userAgent: String,
   screenResolution: String,
   timezone: String,
   cookiesEnabled: Boolean,
   referer: String,
+  visitTime: { type: Date, default: () => new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Bucharest" })) }
 });
 
-const ChatSchema = new mongoose.Schema({
-  sessionId: String,
-  message: String,
-  ip: String,
-  timestamp: String,
+const chatSchema = new mongoose.Schema({
+  visitorId: mongoose.Schema.Types.ObjectId,
+  messages: [{
+    text: String,
+    timestamp: { type: Date, default: Date.now }
+  }]
 });
 
-const UserSessionSchema = new mongoose.Schema({
-  sessionId: { type: String, unique: true },
-  visits: [
-    {
-      ip: String,
-      geo: Object,
-      timestamp: String,
-      browser: String,
-      platform: String,
-      language: String,
-      userAgent: String,
-      screenResolution: String,
-      timezone: String,
-      cookiesEnabled: Boolean,
-      referer: String,
-    },
-  ],
-});
+const Visitor = mongoose.model('Visitor', visitorSchema);
+const Chat = mongoose.model('Chat', chatSchema);
 
-const Visitor = mongoose.model('Visitor', VisitorSchema);
-const Chat = mongoose.model('Chat', ChatSchema);
-const UserSession = mongoose.model('UserSession', UserSessionSchema);
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Helper: get IP from req
-function getClientIP(req) {
-  return (
-    req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || ''
-  );
+// Helper to get client IP (behind proxies too)
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',').shift() || req.connection.remoteAddress;
 }
 
 // Routes
@@ -77,78 +60,59 @@ function getClientIP(req) {
 // Save visitor info
 app.post('/api/visitor-info', async (req, res) => {
   try {
-    const ip = getClientIP(req);
-    const geo = geoip.lookup(ip);
-    const roTime = moment().tz('Europe/Bucharest').format();
+    const ip = getClientIp(req);
+    const geo = geoip.lookup(ip) || {};
+    const ua = useragent.parse(req.body.userAgent);
 
-    const {
-      sessionId,
-      browser,
-      platform,
-      language,
-      userAgent,
-      screenResolution,
-      timezone,
-      cookiesEnabled,
-      referer,
-    } = req.body;
-
-    const visitData = {
-      sessionId,
+    const visitor = new Visitor({
       ip,
       geo,
-      timestamp: roTime,
-      browser,
-      platform,
-      language,
-      userAgent,
-      screenResolution,
-      timezone,
-      cookiesEnabled,
-      referer,
-    };
+      userAgent: req.body.userAgent,
+      browser: ua.toAgent(),
+      os: ua.os.toString(),
+      platform: req.body.platform,
+      language: req.body.language,
+      screenResolution: req.body.screenResolution,
+      timezone: req.body.timezone,
+      cookiesEnabled: req.body.cookiesEnabled,
+      referer: req.body.referer,
+    });
 
-    // Save visit in Visitor collection (flat log)
-    await Visitor.create(visitData);
+    await visitor.save();
 
-    // Upsert user session - add visit to visits array or create new
-    await UserSession.findOneAndUpdate(
-      { sessionId },
-      { $push: { visits: visitData } },
-      { upsert: true, new: true }
-    );
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('Error saving visitor info:', err);
-    res.status(500).send(err.message);
+    res.status(201).json({ message: 'Visitor info saved', visitorId: visitor._id });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to save visitor info' });
   }
 });
 
 // Save chat message
 app.post('/api/chat-message', async (req, res) => {
   try {
-    const ip = getClientIP(req);
-    const roTime = moment().tz('Europe/Bucharest').format();
+    // Expecting visitorId and message in body
+    const { visitorId, message } = req.body;
+    if (!visitorId || !message) return res.status(400).json({ error: 'Missing visitorId or message' });
 
-    const { sessionId, message } = req.body;
-    if (!message || !sessionId) return res.status(400).send('Missing data');
+    let chat = await Chat.findOne({ visitorId });
+    if (!chat) {
+      chat = new Chat({ visitorId, messages: [] });
+    }
+    chat.messages.push({ text: message });
+    await chat.save();
 
-    await Chat.create({
-      sessionId,
-      message,
-      ip,
-      timestamp: roTime,
-    });
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('Error saving chat message:', err);
-    res.status(500).send(err.message);
+    res.status(201).json({ message: 'Message saved' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to save chat message' });
   }
 });
 
-// Start server
+// Serve index.html on root
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
