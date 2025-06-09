@@ -1,118 +1,80 @@
-require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const bodyParser = require('body-parser');
 const geoip = require('geoip-lite');
-const useragent = require('useragent');
-const path = require('path');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => console.error('MongoDB connection error:', err));
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public')); // folder cu index.html
 
-// Schemas
+// MongoDB Connection
+mongoose.connect('mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/kidscars?retryWrites=true&w=majority')
+  .then(() => console.log("✅ Connected to MongoDB"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
+
+// Mongoose Schemas
 const visitorSchema = new mongoose.Schema({
   ip: String,
-  geo: Object,
+  location: Object,
   userAgent: String,
-  browser: String,
-  os: String,
-  platform: String,
   language: String,
+  platform: String,
   screenResolution: String,
   timezone: String,
   cookiesEnabled: Boolean,
   referer: String,
-  visitTime: { type: Date, default: () => new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Bucharest" })) }
+  timestamp: { type: Date, default: () => new Date().toLocaleString('en-US', { timeZone: 'Europe/Bucharest' }) }
 });
 
-const chatSchema = new mongoose.Schema({
-  visitorId: mongoose.Schema.Types.ObjectId,
-  messages: [{
-    text: String,
-    timestamp: { type: Date, default: Date.now }
-  }]
+const messageSchema = new mongoose.Schema({
+  message: String,
+  ip: String,
+  timestamp: { type: Date, default: () => new Date().toLocaleString('en-US', { timeZone: 'Europe/Bucharest' }) }
 });
 
 const Visitor = mongoose.model('Visitor', visitorSchema);
-const Chat = mongoose.model('Chat', chatSchema);
-
-// Middleware
-app.use(cors());
-app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Helper to get client IP (behind proxies too)
-function getClientIp(req) {
-  return req.headers['x-forwarded-for']?.split(',').shift() || req.connection.remoteAddress;
-}
+const ChatMessage = mongoose.model('ChatMessage', messageSchema);
 
 // Routes
-
-// Save visitor info
 app.post('/api/visitor-info', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+  const location = geoip.lookup(ip) || {};
+
+  const visitor = new Visitor({
+    ip,
+    location,
+    ...req.body
+  });
+
   try {
-    const ip = getClientIp(req);
-    const geo = geoip.lookup(ip) || {};
-    const ua = useragent.parse(req.body.userAgent);
-
-    const visitor = new Visitor({
-      ip,
-      geo,
-      userAgent: req.body.userAgent,
-      browser: ua.toAgent(),
-      os: ua.os.toString(),
-      platform: req.body.platform,
-      language: req.body.language,
-      screenResolution: req.body.screenResolution,
-      timezone: req.body.timezone,
-      cookiesEnabled: req.body.cookiesEnabled,
-      referer: req.body.referer,
-    });
-
     await visitor.save();
-
-    res.status(201).json({ message: 'Visitor info saved', visitorId: visitor._id });
+    res.status(201).json({ message: 'Visitor saved' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to save visitor info' });
+    console.error('Error saving visitor:', error);
+    res.status(500).json({ error: 'Failed to save visitor' });
   }
 });
 
-// Save chat message
 app.post('/api/chat-message', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+
+  const chat = new ChatMessage({
+    message: req.body.message,
+    ip
+  });
+
   try {
-    // Expecting visitorId and message in body
-    const { visitorId, message } = req.body;
-    if (!visitorId || !message) return res.status(400).json({ error: 'Missing visitorId or message' });
-
-    let chat = await Chat.findOne({ visitorId });
-    if (!chat) {
-      chat = new Chat({ visitorId, messages: [] });
-    }
-    chat.messages.push({ text: message });
     await chat.save();
-
     res.status(201).json({ message: 'Message saved' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to save chat message' });
+    console.error('Error saving chat message:', error);
+    res.status(500).json({ error: 'Failed to save message' });
   }
-});
-
-// Serve index.html on root
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
